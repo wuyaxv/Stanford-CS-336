@@ -41,6 +41,7 @@ class BPETokenizer(BaseTokenizer):
         self.vocab_size: int # vocabulary size
         self.special_tokens: list[str] # Special tokens which are used to encode metadata. They are always be treated as a single token.
         self.vocab: dict[int, bytes]
+        self.merge: list[dict[bytes, bytes]] = list()
 
         self.pat = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
@@ -57,6 +58,46 @@ class BPETokenizer(BaseTokenizer):
         '''
 
         return re.finditer(self.pat, text)
+        # Let's just define pre tokenization as words spliting on space for now.
+        #return iter(text.split(' '))
+    
+    def _merge(self, t: tuple[bytes, bytes], new_idx: int, frequency_table: dict[tuple[bytes], int]) -> dict[tuple[bytes], int]:
+        """Merge freqeuency table
+        
+        Combines the bytes which determined as the most freqeuent subword token.
+        """
+
+        new_frequency_table: list[tuple[tuple[bytes], int]] = list()
+        i: int = 0
+
+        for sub, count in frequency_table.items():
+            _ = []
+            i = 0
+            while i < len(sub)-1:
+                if sub[i] == t[0] and sub[i+1] == t[1]:
+                    _.append(new_idx) # merge the most freqeuent subset
+                    i+=2
+                else:
+                    _.append(sub[i])
+                    i+=1
+            if i == len(sub)-1: _.append(sub[i])
+            new_frequency_table.append((tuple(_), count))
+
+        return defaultdict(int, new_frequency_table)
+
+    def _max(self, base_vocab, d: dict[tuple[bytes, bytes], int]) -> bytes:
+        __max = 0
+        r = []
+
+        for k, v in d.items():
+            if v > __max:
+                r.clear()
+                r.append((k, base_vocab[k[0]]+base_vocab[k[1]], v))
+                __max = v
+            elif v == __max:
+                r.append((k, base_vocab[k[0]]+base_vocab[k[1]], v))
+
+        return sorted(r, key=lambda k: k[1])[-1][0]
 
 
     def train(self):    
@@ -79,7 +120,7 @@ class BPETokenizer(BaseTokenizer):
         # self.vocab = dict(base_vocab)
 
         pretokenized_words: Iterator = self._pre_tokenization(text)
-        frequency_table: dict[tuple[byte, byte], int] = defaultdict(int)
+        frequency_table: dict[tuple[bytes], int] = defaultdict(int)
 
         for word in pretokenized_words:
             _word = tuple(word[0].encode('utf-8'))
@@ -88,28 +129,33 @@ class BPETokenizer(BaseTokenizer):
             else:
                 frequency_table[_word] = 1
 
-        _merges: dict[tuple(bytes, bytes), int] = defaultdict(int) # Store current maximum frequence subwords
         for i in range(vocab_size - 255):
-            for to_merge in frequency_table:
+            _merges: dict[tuple[bytes, bytes], int] = defaultdict(int) # Store current maximum frequence subwords
+            for to_merge, v in frequency_table.items():
                 for _ in zip(to_merge, to_merge[1:]): # Count frequency
-                    _merges[_] = 1 if (_ not in _merges.keys()) else _merges[_]+1
-
+                    _merges[_] = 1*v if (_ not in _merges.keys()) else _merges[_]+1*v
             # update the frequency table
-            _max_counts_k = max(_merges, key=_merges.get)
-            base_vocab.append(bytes(_max_counts_k)) # append the frequency table
+            try:
+                _max_counts_k = self._max(base_vocab, _merges)
+            except ValueError:
+                break
 
-        return base_vocab
+            base_vocab.append(base_vocab[_max_counts_k[0]]+base_vocab[_max_counts_k[1]]) # append the frequency table
+
+            # so here we have to implement a merge function.
+            frequency_table = self._merge(_max_counts_k, len(base_vocab)-1, frequency_table)
+            self.merge.append(_max_counts_k)
+
+        return frequency_table, base_vocab, self.merge
 
 if __name__ == '__main__':
-    text = '''
-    low low low low low
-lower lower widest widest widest
-newest newest newest newest newest newest
-'''
+    text = '''low low low low low lower lower widest widest widest newest newest newest newest newest newest'''
 
     from pprint import pprint
     bpe = BPETokenizer()
-    pprint(bpe._train(text, 289, ['<|endoftext|>']))
+    with open("tests/fixtures/TinyStoriesV2-GPT4-train.txt", 'r') as f:
+        text = f.read()
+        pprint(bpe._train(text, 500, ['<|endoftext|>']))
 
 
 
