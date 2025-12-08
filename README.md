@@ -46,3 +46,4 @@ This course is designed to provide sufficient knowledge of language models by wa
         - Matrix multiplication
             - A lot of optimizations under the hood. Looking forward to it!
     - jaxtyping and einops
+- Update on 2025-12-07: Basic implementation of BPE Tokenizer but requires optimization.
