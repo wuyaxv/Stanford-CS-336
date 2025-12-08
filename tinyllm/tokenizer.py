@@ -1,125 +1,116 @@
-from abc import ABC
 from dataclasses import dataclass
 from collections import defaultdict
+from collections.abc import Iterator
+from abc import ABC
 
-import os
+import regex as re
 
-@dataclass(frozen=True)
-class TokenizerParams:
-    vocab: ...
-    merges: ...
+class BaseTokenizer(ABC):
 
-class Tokenizer(ABC):
-    """Abstract interface for a tokenizer.
+    def __init__(self):
+        ...
 
-    There are 3 primary functions of a Tokenizer:
-        1) Train the tokenizer vocabulary and merges on a given text,
-        2) encode from text to tokens,
-        3) decode from tokens to text.
-    """
-    def encode(self, string: str) -> list[int]:
-        raise NotImplementedError
+    def encode(self):
+        """encoder 
 
-    def decode(self, indices: list[int]) -> str:
-        raise NotImplementedError
-
-    def train(self, input_path, vocab_size: int, special_tokens: list) -> TokenizerParams:
-        raise NotImplementedError
-
-
-@dataclass(frozen=True) # frozen=True => assigning to fields will generate an exception.
-class BPETokenizerParams(TokenizerParams):
-    """All you need to specify a BPETokenizer."""
-    vocab: dict[int, bytes]     # index -> bytes
-    merges: dict[tuple[int, int], int]  # index1,index2 -> new_index
-
-class CharacterTokenizer(Tokenizer):
-    """Represent a string as a sequence of Unicode code points."""
-    def encode(self, string: str) -> list[int]:
-        return list(map(ord, string))
-    def decode(self, indices: list[int]) -> str:
-        return "".join(map(chr, indices))
-
-class ByteTokenizer(Tokenizer):
-    """Represent a string as a sequence of bytes."""
-    def encode(self, string: str) -> list[int]:
-        string_bytes = string.encode("utf-8")  # @inspect string_bytes
-        indices = list(map(int, string_bytes))  # @inspect indices
-        return indices
-    def decode(self, indices: list[int]) -> str:
-        string_bytes = bytes(indices)  # @inspect string_bytes
-        string = string_bytes.decode("utf-8")  # @inspect string
-        return string
-
-class BPETokenizer(Tokenizer):
-    """BPE tokenizer given a set of merges and a vocabulary."""
-    def __init__(self, params: BPETokenizerParams | None = None):
-        self.params = params if params else BPETokenizerParams(dict(), dict())
-
-    def encode(self, string: str) -> list[int]:
-        """encode
-        :param string
         """
-        indices = list(map(int, string.encode("utf-8")))  # @inspect indices
-        # Note: this is a very slow implementation
-        for pair, new_index in self.params.merges.items():  # @inspect pair, @inspect new_index
-            indices = merge(indices, pair, new_index)
-        return indices
+        raise NotImplementedError
 
-    def decode(self, indices: list[int]) -> str:
-        bytes_list = list(map(self.params.vocab.get, indices))  # @inspect bytes_list
-        string = b"".join(bytes_list).decode("utf-8")  # @inspect string
-        return string
+    def decode(self):
+        raise NotImplementedError
 
-    def train(self, input_path: str | os.PathLike, vocab_size: int, special_tokens: list[str] = ["<|endoftext|>"]) -> BPETokenizerParams:
-        """Train a Byte-Pair Embedding (BPE) tokenizer
+    def train(self):
+        raise NotImplementedError
 
-        The BPE algorithm was orignally described in 1994: "A New Algorithm for Data Compression" by Philip Gage.
 
-        BPE algorithm outline:
-            1. Identify frequent pairs. In each iteration, scan the text for the most commonly occurring pair of bytes.
-            2. Replace and record. Replace that pair with a new placeholder ID (> 255), the first placeholder would be 256,
-                cause the bytes are encoded between 0 to 255 already; Then record this mapping in a lookup table; The size of
-                the lookup table is a hyperparameter, also called vocabulary size (vocab_size).
-            3. Repeat the process to continually merging the most frequent pairs; Stop when no further compression is possible
-            4. (For decoding) to restore the original text, reverse the process by substituting each ID with its corresponding pair, using
-                the lookup table.
+class BPETokenizer(BaseTokenizer):
+    """This is a implementation of Byte-Pair Encoding (BPE) Tokenizer
 
-        Assignment 1 Requirements:
-            1. encode() only loop over merges that matter.
-            2. Detect and preserve special tokens <|endoftext|>
-            3. Use pre-tokenization (e.g., the GPT-2 tokenizer regex)
-            4. Try to make the implementation as fast as possible
+    TODO: 
+        - represent arbitary Unicode strings as a sequence of bytes and train our BPE tokeinzer on this byte sequence.
+        - Use trained tokenizer to encode text into tokens.
+
+    DONE:
+
+    UPDATEs:
+        - Update (2025-12-08): Created the class
+
+    """
+
+    def __init__(self):
+        self.vocab_size: int # vocabulary size
+        self.special_tokens: list[str] # Special tokens which are used to encode metadata. They are always be treated as a single token.
+        self.vocab: dict[int, bytes]
+
+        self.pat = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+    def _pre_tokenization(self, text: str) -> Iterator:
+        '''Pre tokenization
+
+        The original BPE implementation [Sennrich et al., 2016]
+            uses method that simply splitting on whitespaces. In this 
+            implementation we use a regex-based pre-tokenizer used
+            by GPT-2 [Radford et al., 2019].
 
         Args:
-            input_path (str | os.PathLike): Path to the BPE tokenizer training data.
-            vocab_size (int): Total number of items in the tokenizer's vocabulary, including special tokens.
-            special_tokens (list[str]): A list of string special tokens to be added to the tokenizer vocabulary.
-                These strings will never be split into multiple tokens, and will always be kept as a single token.
+            text (str): corpus (sentences) to be processed.
+        '''
 
-        Returns:
-            tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-                vocab:
-                    The trained tokenizer vocabulary, a mapping from int (token ID in the vocabulary)
-                    to bytes (token bytes). vocab is used for speedy lookup and transform token into IDs.
-                merges:
-                    BPE merges. Each list item is a tuple of bytes (<token1>, <token2>). merges are used for dissecting texts into tokens
+        return re.finditer(self.pat, text)
+
+
+    def train(self):    
+        ...
+
+    def _train(self, text: str, vocab_size: int, special_tokens: list[str]):
+        """Train the BPE tokenizer
+
+        Step: Preprocessing. split corpus into words.
+        Step: Initialize vocabulary with 256 characters and special_tokens.
+
         """
+        
+        assert vocab_size > 255 # This is must
 
-        raise NotImplementedError
+        #base_vocab = [(i,bytes([b])) for i, b in enumerate(range(256))]
+        base_vocab = [bytes([i]) for i in range(256)]
+        for s in special_tokens:
+            base_vocab.append(s.encode('utf-8'))
+        # self.vocab = dict(base_vocab)
 
-    def _train(self, sentence: str, vocab_size: int, special_tokens: list[str] = ["<|endoftext|>"]):
+        pretokenized_words: Iterator = self._pre_tokenization(text)
+        frequency_table: dict[tuple[byte, byte], int] = defaultdict(int)
 
-        assert vocab_size > 255
+        for word in pretokenized_words:
+            _word = tuple(word[0].encode('utf-8'))
+            if _word in frequency_table.keys():
+                frequency_table[_word] += 1
+            else:
+                frequency_table[_word] = 1
 
-        # GPT-2 pre-tokenization: Replace space with "Ġ"
-        # E.g., "Hello World" might be tokenized as ["Hello", "ĠWorld"]
+        _merges: dict[tuple(bytes, bytes), int] = defaultdict(int) # Store current maximum frequence subwords
+        for i in range(vocab_size - 255):
+            for to_merge in frequency_table:
+                for _ in zip(to_merge, to_merge[1:]): # Count frequency
+                    _merges[_] = 1 if (_ not in _merges.keys()) else _merges[_]+1
 
+            # update the frequency table
+            _max_counts_k = max(_merges, key=_merges.get)
+            base_vocab.append(bytes(_max_counts_k)) # append the frequency table
 
-        raise NotImplementedError
+        return base_vocab
 
 if __name__ == '__main__':
+    text = '''
+    low low low low low
+lower lower widest widest widest
+newest newest newest newest newest newest
+'''
 
-    ...
+    from pprint import pprint
+    bpe = BPETokenizer()
+    pprint(bpe._train(text, 289, ['<|endoftext|>']))
+
+
 
 
