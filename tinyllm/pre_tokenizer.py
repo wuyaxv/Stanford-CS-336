@@ -1,7 +1,7 @@
 import regex as re
 from abc import ABC, abstractmethod
 
-from typing import Union, Optional, TextIO, BinaryIO, Any
+from typing import TextIO, BinaryIO
 import io # io.TextIOBase, io.BufferedIOBase
 import os # os.PathLike
 
@@ -16,8 +16,8 @@ class GPT2PreTokenizer(PreTokenizer):
 
     PATTERN = r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
     def __init__(self, \
-            source: str | os.PathLike | TextIO | BinaryIO, \
-            special_tokens: list[str|bytes] | None = None, \
+            source: str | bytes | os.PathLike | TextIO | BinaryIO, \
+            special_tokens: list[str] | list[bytes] | None = None, \
             ):
         '''GPT2 pre-tokenizer
 
@@ -85,7 +85,7 @@ if __name__ == '__main__':
     import pathlib
 
     text: str
-    special_tokens = ["<|", "|>"]
+    special_tokens = [b"<|", "|>"]
     p = pathlib.Path('Sampletext')
 
     gpt2_pt = GPT2PreTokenizer(p, special_tokens)
