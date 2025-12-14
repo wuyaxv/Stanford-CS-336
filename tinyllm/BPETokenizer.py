@@ -1,7 +1,6 @@
-from typing import Optional, Any
+from typing import Optional, Any, Sequence
 from typing import List, Dict, Tuple, TextIO, BinaryIO
 from typing import Generator
-from typing import TextIO, BinaryIO
 
 from dataclasses import dataclass
 from functools import total_ordering
@@ -143,7 +142,11 @@ class BPETokenizer(Tokenizer):
 
     def _update_pair_to_words(self, pair, word):
         if pair in self.pair_to_words:
-            if word not in self.pair_to_words[pair]: self.pair_to_words[pair].append(word) # Add a new word to the pair to word index # 这里我只添加了新的，没有删除旧的
+            # if word not in self.pair_to_words[pair]: self.pair_to_words[pair].append(word) # Add a new word to the pair to word index # 这里我只添加了新的，没有删除旧的
+            for _w in self.pair_to_words[pair]:
+                if self._assemble_token(word) == self._assemble_token(_w):
+                    del self.pair_to_words[pair][self.pair_to_words[pair].index(_w)] # Delete the old ones that represent the same word
+            self.pair_to_words[pair].append(word)
         else:
             self.pair_to_words[pair] = [word] # Create a new index for the pair if not exist
 
@@ -157,7 +160,7 @@ class BPETokenizer(Tokenizer):
             if p in self.pair_freq and self.pair_freq[p] == poped_value.count: # 必须确保弹出的pair和当前的pair_freq匹配，否则说明数据过时
                 return p
 
-    def _merge_pair_and_get_adjacent_pairs(self, new_idx: int, pair_to_merge: Tuple[int, int], token: bytes) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], int]:
+    def _merge_pair_and_get_adjacent_pairs(self, new_idx: int, pair_to_merge: Tuple[int, int], token: bytes) -> Tuple[List[int], List[Tuple[int, int]], List[Tuple[int, int]], int]:
         """Search and find the adjacent pairs in word_decoded table while merge the largest pair that's newly been found.
 
         Return:
@@ -166,11 +169,11 @@ class BPETokenizer(Tokenizer):
             matched (int)
         """
 
-        old_adjacent_pairs = []
-        new_adjacent_pairs = []
-        new_id_list = []
-        id_list = self.word_decoded[token]
-        id_list_len = len(id_list)
+        old_adjacent_pairs = []             # 合并后需要减少计数的对
+        new_adjacent_pairs = []             # 合并后需要添加计数的对
+        new_id_list = []                    # 用于更新原本的单词的id列表
+        id_list = self.word_decoded[token]  # 未合并前的单词的id列表
+        id_list_len = len(id_list)          # 单词列表长度
         i: int
         matched: int = 0
 
@@ -179,6 +182,8 @@ class BPETokenizer(Tokenizer):
             if pair_to_merge == tuple(id_list):
                 matched += 1
                 new_id_list = [new_idx]
+            else: 
+                raise ValueError("需要修改一个2元的数组，但是和待合并的元组不匹配")
         else:
             if tuple(id_list[:2]) == pair_to_merge: 
                 matched += 1
@@ -218,11 +223,11 @@ class BPETokenizer(Tokenizer):
                     new_id_list.append(id_list[-1])
 
         assert token in self.word_decoded
-        self.word_decoded[token] = new_id_list      # Update the word_decoded list
-        del self.pair_to_words[pair_to_merge][self.pair_to_words[pair_to_merge].index(id_list)]
+        # self.word_decoded[token] = new_id_list      # Update the word_decoded list
+        # del self.pair_to_words[pair_to_merge][self.pair_to_words[pair_to_merge].index(id_list)]
         # 这里我还要更新self.pair_to_word，否则的话pair_to_word记录的仍然是旧的word_record
 
-        return old_adjacent_pairs, new_adjacent_pairs, matched
+        return new_id_list, old_adjacent_pairs, new_adjacent_pairs, matched
     
     def encode(self):
         ...
@@ -251,7 +256,7 @@ class BPETokenizer(Tokenizer):
             # i.e. word_freq, word_decoded, pair_freq, pair_to_words
             for token in token_generator:
                 self._update_word_freq(token, 1)
-                self._add_word_decoded(token)
+                self._add_word_decoded(token)          # Add the entry of the dissect words with IDs for the word
                 new_pair_bytes = zip(token, token[1:]) # generate new pairs
                 for npb in new_pair_bytes:
                     np = (self._inverse_lookup(bytes([npb[0]])), self._inverse_lookup(bytes([npb[1]])))
@@ -259,14 +264,16 @@ class BPETokenizer(Tokenizer):
                     self._update_pair_to_words(np, token) # Update the pair_to_word lookup table
 
             self._init_pair_freq_heap() # 初始化优先队列
-
+            
             # Generate vocab based on pair frequency
             while self.vocab_size <= self.target_vocab_size and len(self.pair_freq) > 0:
-                largest_pair: Tuple[int, int]
+                largest_pair: Tuple[int, int]                   # The pair with the largest frequency and alphabeticals
+                new_id_list: List[int]
                 old_adjacent_pairs: List[Tuple[int, int]]
                 new_adjacent_pairs: List[Tuple[int, int]]
                 count: int
                 new_id: int
+                delete:  bool
 
                 largest_pair = self._pop_the_largest_pair() # pop the largest pair
                 count = self.pair_freq[largest_pair]        # frequency of the largest pair
@@ -274,30 +281,41 @@ class BPETokenizer(Tokenizer):
 
                 self._update_merges(largest_pair)                  # Track the merged pairs history
                 new_id = self._update_vocab(largest_pair)          # Add new pair to the vocabulary and get the new id
+                print("vocab: {:<8d}: {}".format(new_id, self.vocab[new_id]))
 
                 word_l = self.pair_to_words[largest_pair]           # Get the word list of the updated pair for updating the frequency of adjacent pairs
 
                 # Now its time to update the word table
                 for w in word_l:
                     word_count = self.word_freq[w] # Get the word count to calc the delta for updating the pair_freq of adjacent pairs.
-                    old_adjacent_pairs, new_adjacent_pairs, matched = \
-                            self._merge_pair_and_get_adjacent_pairs(new_id,
-                                                                    largest_pair, # pair_to_merge
-                                                                    w,            # token to be searched in the word_decomposed
-                                                                    )
-                    self._update_pair_freq(largest_pair, -matched * word_count) # Decrease the largest pair's frequency
+                    new_id_list, old_adjacent_pairs, new_adjacent_pairs, matched = \
+                            self._merge_pair_and_get_adjacent_pairs(new_id, largest_pair, w)
+
+                    # for each iteration, we need to update the frequency of (1. pair_freq for the largest pair, 2. pair_freq for the old pair, 3. pair_freq for the new pairs), change 
+                    # pair_to_words mapping
+                    self.word_decoded[w] = new_id_list                          # Update the word decoded
+                    # self._update_pair_freq(largest_pair, -matched * word_count) # Decrease the largest pair's frequency
                     accumulate += word_count*matched # Debug
+
                     for o_adj_p in old_adjacent_pairs:
                         self._update_pair_freq(o_adj_p, -word_count)
+                        delete = True
+                        for p1, p2 in zip(new_id_list, new_id_list[1:]):
+                            if o_adj_p == (p1, p2): delete = False
+                        if delete: 
+                            del self.pair_to_words[o_adj_p][self.pair_to_words[o_adj_p].index(w)]
+                            if len(self.pair_to_words[o_adj_p]) == 0: del self.pair_to_words[o_adj_p]
                     for n_adj_p in new_adjacent_pairs:
                         self._update_pair_freq(n_adj_p, word_count)
                         self._update_pair_to_words(n_adj_p, w)                  # update hte pair to words for the newly created adjacent words
 
+                # CleanUp
+                del self.pair_freq[largest_pair] # Clean merged pairs in pair_freq
                 assert accumulate == count
 
+
+
     def _init_vocab(self):
-        """Initialize vocabulary using special tokens and bytes from 0 to 255
-        """
         vocab = {}
         count = 0
         for st in self.special_tokens:
@@ -310,40 +328,34 @@ class BPETokenizer(Tokenizer):
     
     def _get_chunk(self, input_path: str|os.PathLike, chunk_size=4096) -> Generator[bytes, None, None]:
         self.source = input_path
+
         return self._read_from_source(chunk_size=chunk_size)
 
-    def _lookup(self, i:int) -> str:
-        """Lookup the vocabulary table by ID
-        """
+    def _lookup(self, i:int) -> bytes:
 
         return self.vocab[i]
 
-    def _inverse_lookup(self, w:str) -> int:
-        """Reverse the vocabulary table by bytes and returns the respective ID
-        """
+    def _inverse_lookup(self, w:bytes) -> int:
 
         return self.inverse_vocab[w]
 
-    def _assemble_bytes(self, pair: Tuple[int, int]) -> str:
-        """Take a pair of IDs and return their assembled bytes
+    def _assemble_bytes(self, pair: Tuple[int, int]) -> bytes:
 
-        Args:
-            pair (tuple[int, int])
-
-        Returns:
-            Assembled bytes (bytes)
-        """
         return self._lookup(pair[0])+self._lookup(pair[1])
+
+    def _assemble_token(self, ids: Sequence[int]) -> bytes:
+
+        assembled: bytes = b''
+        for _id in ids:
+            assembled += self._lookup(_id)
+
+        return assembled
+
 
     def _read_from_source(self, \
             start: int | None = None, \
             end: int | None = None, \
             chunk_size: int = 4096):
-        """Read from source in chunked bytes (default in 4096 bytes)
-
-        If the start and end is designated, then read from start to end
-        int bytes
-        """
 
         if isinstance(self.source, os.PathLike): # Read from a file
             length_of_file: int
@@ -394,7 +406,7 @@ class BPETokenizer(Tokenizer):
 
 if __name__ == '__main__':
     import pathlib
-    input_path = pathlib.Path('Sampletext')
+    input_path = pathlib.Path('tests/fixtures/tinystories_sample_5M.txt')
     special_tokens = ['<|endoftext|>']
     vocab_size = 50000
 
