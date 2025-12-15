@@ -1,9 +1,10 @@
+from typing import Tuple, List
 word_decoded = {"hello":[1,2,3,4,5,6,7]}
-word_decoded = {"hello":[3,4,3,3,3,3,3,3,3]}
+word_decoded = {"hello":[3,3,3,3,3,3]}
 #word_decoded = {"hello":[3,4]}
 print(word_decoded)
 new_idx = 77
-pair_to_merge=(3,4)
+pair_to_merge=(3,3)
 token = "hello"
 def _merge_pair_and_get_old_adjacent_pairs(new_idx: int, pair_to_merge: Tuple[int, int], token: bytes) -> List[Tuple[int, int]]:
     """Search and find the adjacent pairs in word_decoded table while merge the largest pair that's newly been found.
