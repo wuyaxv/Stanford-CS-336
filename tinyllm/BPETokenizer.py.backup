@@ -1,6 +1,7 @@
-from typing import Optional, Any, Sequence
+from typing import Optional, Any
 from typing import List, Dict, Tuple, TextIO, BinaryIO
 from typing import Generator
+from typing import TextIO, BinaryIO
 
 from dataclasses import dataclass
 from functools import total_ordering
@@ -162,7 +163,7 @@ class BPETokenizer(Tokenizer):
             if p in self.pair_freq and self.pair_freq[p] == poped_value.count: # 必须确保弹出的pair和当前的pair_freq匹配，否则说明数据过时
                 return p
 
-    def _merge_pair_and_get_adjacent_pairs(self, new_idx: int, pair_to_merge: Tuple[int, int], token: bytes) -> Tuple[List[int], List[Tuple[int, int]], List[Tuple[int, int]], int]:
+    def _merge_pair_and_get_adjacent_pairs(self, new_idx: int, pair_to_merge: Tuple[int, int], token: bytes) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], int]:
         """Search and find the adjacent pairs in word_decoded table while merge the largest pair that's newly been found.
 
         Return:
@@ -172,11 +173,11 @@ class BPETokenizer(Tokenizer):
             matched (int)
         """
 
-        old_adjacent_pairs = []             # 合并后需要减少计数的对
-        new_adjacent_pairs = []             # 合并后需要添加计数的对
-        new_id_list = []                    # 用于更新原本的单词的id列表
-        id_list = self.word_decoded[token]  # 未合并前的单词的id列表
-        id_list_len = len(id_list)          # 单词列表长度
+        old_adjacent_pairs = []
+        new_adjacent_pairs = []
+        new_id_list = []
+        id_list = self.word_decoded[token]
+        id_list_len = len(id_list)
         i: int
         matched: int = 0
 
@@ -346,34 +347,40 @@ class BPETokenizer(Tokenizer):
 
     def _get_chunk(self, input_path: str|os.PathLike, chunk_size=4096) -> Generator[bytes, None, None]:
         self.source = input_path
-
         return self._read_from_source(chunk_size=chunk_size)
 
-    def _lookup(self, i:int) -> bytes:
+    def _lookup(self, i:int) -> str:
+        """Lookup the vocabulary table by ID
+        """
 
         return self.vocab[i]
 
-    def _inverse_lookup(self, w:bytes) -> int:
+    def _inverse_lookup(self, w:str) -> int:
+        """Reverse the vocabulary table by bytes and returns the respective ID
+        """
 
         return self.inverse_vocab[w]
 
-    def _assemble_bytes(self, pair: Tuple[int, int]) -> bytes:
+    def _assemble_bytes(self, pair: Tuple[int, int]) -> str:
+        """Take a pair of IDs and return their assembled bytes
 
+        Args:
+            pair (tuple[int, int])
+
+        Returns:
+            Assembled bytes (bytes)
+        """
         return self._lookup(pair[0])+self._lookup(pair[1])
-
-    def _assemble_token(self, ids: Sequence[int]) -> bytes:
-
-        assembled: bytes = b''
-        for _id in ids:
-            assembled += self._lookup(_id)
-
-        return assembled
-
 
     def _read_from_source(self, \
             start: int | None = None, \
             end: int | None = None, \
             chunk_size: int = 4096):
+        """Read from source in chunked bytes (default in 4096 bytes)
+
+        If the start and end is designated, then read from start to end
+        int bytes
+        """
 
         if isinstance(self.source, os.PathLike): # Read from a file
             length_of_file: int
