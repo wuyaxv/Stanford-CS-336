@@ -8,6 +8,7 @@ from collections import defaultdict
 from abc import ABC, abstractmethod
 
 from pre_tokenizer import GPT2PreTokenizer
+from utils import timeit
 
 import io
 import os
@@ -35,7 +36,8 @@ class BPEHeapElement:
         if self.count != other.count:
             return self.count > other.count
         else:
-            return self.in_bytes > other.in_bytes
+            # return self.in_bytes > other.in_bytes
+            return self.pair > other.pair
 
     def __eq__(self, other):
         return self.count == other.count \
@@ -90,7 +92,8 @@ class BPETokenizer(Tokenizer):
         return new_idx
 
     def _update_merges(self, new_pair: Tuple[int, int]):
-        self.merges.append(new_pair)
+        # self.merges.append(new_pair)
+        self.merges.append((self._lookup(new_pair[0]), self._lookup(new_pair[1])))
 
     def _update_word_freq(self, token: bytes, delta: int = 1):
         self.word_freq[token] += delta
@@ -232,10 +235,13 @@ class BPETokenizer(Tokenizer):
     def decode(self):
         ...
 
+    @timeit
     def train(self, input_path: str, vocab_size: int, special_tokens: List[str]|None = None) -> Tuple[Dict[int, bytes], List[tuple[int, int]]]:
         self._train(input_path, vocab_size, special_tokens)
 
         # replace space with 
+        print(type(self.vocab))
+        print(type(self.merges))
         return self.vocab, self.merges
 
     def _train(self, input_path: str, vocab_size: int, special_tokens: List[str]):
@@ -263,7 +269,7 @@ class BPETokenizer(Tokenizer):
             self._init_pair_freq_heap() # 初始化优先队列
 
         # Generate vocab based on pair frequency
-        while self.vocab_size <= self.target_vocab_size and len(self.pair_freq) > 0:
+        while self.vocab_size < self.target_vocab_size and len(self.pair_freq) > 0:
             largest_pair: Tuple[int, int]               # 当前按排序规则最大的对
             old_adjacent_pairs: List[Tuple[int, int]]   # 合并对后相邻的对需要对应减少频率
             new_adjacent_pairs: List[Tuple[int, int]]   # 同合并对的新ID组合的新对频率增加
@@ -279,36 +285,16 @@ class BPETokenizer(Tokenizer):
             # 更新字典和合并日志
             self._update_merges(largest_pair)                  # Track the merged pairs history
             new_id = self._update_vocab(largest_pair)          # Add new pair to the vocabulary and get the new id
+            print(new_id, ':', self.vocab[new_id])
 
             # 进行合并
             word_l = self.pair_to_words[largest_pair].copy()          # Get the word list of the updated pair for updating the frequency of adjacent pairs
-
-            # DEBUG -------------------------------------------------
-            if largest_pair == (11, 11):
-                print(largest_pair, 'before', '-'*30)
-                print(self.pair_to_words[largest_pair])
-                print(self.word_freq[word_l[0]], self.word_freq[word_l[1]])
-                print(largest_pair, 'before', '-'*30)
-            # DEBUG -------------------------------------------------
-
-
             for w in word_l:
                 word_count = self.word_freq[w] # Get the word count to calc the delta for updating the pair_freq of adjacent pairs.
                 new_word_decoded_list, old_adjacent_pairs, new_adjacent_pairs, matched = \
                         self._merge_pair_and_get_adjacent_pairs(new_id, largest_pair, w)
-                try: 
-                    self._update_pair_freq(largest_pair, -matched * word_count) # Decrease the largest pair's frequency
-                except Exception as e:
-                    print(word_l)
-                    print(self.word_freq[word_l[0]], self.word_freq[word_l[1]])
-                    print(new_id, largest_pair, w)
-                    print(self.word_decoded[w])
-                    print(self.pair_to_words[largest_pair])
-                    print(matched)
-                    print(new_word_decoded_list, old_adjacent_pairs, new_adjacent_pairs, matched)
-                    raise e
 
-                # del self.pair_to_words[largest_pair][self.pair_to_words[largest_pair].index(w)]
+                self._update_pair_freq(largest_pair, -matched * word_count) # Decrease the largest pair's frequency
 
                 accumulate += word_count*matched # Debug                    # Decrease frequency of the current largest pair
 
@@ -331,20 +317,11 @@ class BPETokenizer(Tokenizer):
 
                 self.word_decoded[w] = new_word_decoded_list                # Update the word_decoded for the word `w`
 
-            try:
-                assert accumulate == count
-            except AssertionError as e:
-                print(largest_pair)
-                print("accumulate =", accumulate)
-                print("count =", count)
-                print(word_l)
-                print(self.word_decoded[word_l[1]])
-                print('-'*30)
-                raise e
-            del self.pair_freq[largest_pair]
-            del self.pair_to_words[largest_pair]
+            assert accumulate == count
+            if largest_pair in self.pair_freq: del self.pair_freq[largest_pair]
+            if largest_pair in self.pair_to_words: del self.pair_to_words[largest_pair]
 
-    def _get_chunk(self, input_path: str|os.PathLike, chunk_size=4096) -> Generator[bytes, None, None]:
+    def _get_chunk(self, input_path: str|os.PathLike, chunk_size=1024*1024*1024) -> Generator[bytes, None, None]:
         self.source = input_path
 
         return self._read_from_source(chunk_size=chunk_size)
@@ -373,7 +350,7 @@ class BPETokenizer(Tokenizer):
     def _read_from_source(self, \
             start: int | None = None, \
             end: int | None = None, \
-            chunk_size: int = 4096):
+            chunk_size: int = 536870912):
 
         if isinstance(self.source, os.PathLike): # Read from a file
             length_of_file: int
@@ -424,10 +401,11 @@ class BPETokenizer(Tokenizer):
 
 if __name__ == '__main__':
     import pathlib
-    input_path = pathlib.Path('tests/fixtures/tinystories_sample_5M.txt')
+    input_path = pathlib.Path('../data/TinyStoriesV2-GPT4-train.txt')
+    #input_path = pathlib.Path('tests/fixtures/tinystories_sample_5M.txt')
     # input_path = pathlib.Path('Sampletext')
     special_tokens = ['<|endoftext|>']
-    vocab_size = 50000
+    vocab_size = 10000
 
     bpe = BPETokenizer()
     print(bpe.train(input_path, vocab_size, special_tokens))

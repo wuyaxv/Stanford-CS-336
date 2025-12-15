@@ -56,8 +56,7 @@ class GPT2PreTokenizer(PreTokenizer):
         for t in self.text:
             t = self._remove_special_tokens(t)
             tokens = re.findall(self.pat, t)
-            for token in tokens:
-                yield token
+            return tokens
 
     def _remove_special_tokens(self, text):
         """Remove the special tokens inside the text

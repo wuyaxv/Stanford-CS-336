@@ -47,3 +47,5 @@ This course is designed to provide sufficient knowledge of language models by wa
             - A lot of optimizations under the hood. Looking forward to it!
     - jaxtyping and einops
 - Update on 2025-12-07: Basic implementation of BPE Tokenizer but requires optimization.
+- Update on 2025-12-15: Bug fix and optimization of BPE Tokenizer; Finished Lecture 3.
+    - A working version of BPE Tokenizer with some optimizations implemented. (parallelization not implemented though)
