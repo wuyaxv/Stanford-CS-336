@@ -90,14 +90,3 @@ if __name__ == '__main__':
     gpt2_pt = GPT2PreTokenizer(p, special_tokens)
     for t in gpt2_pt.pre_tokenizer():
         print(t)
-
-
-
-
-        
-        
-
-        
-
-
-    
