@@ -220,3 +220,5 @@ data/
 fixtures/
 
 *.swp
+
+.DS_Store
