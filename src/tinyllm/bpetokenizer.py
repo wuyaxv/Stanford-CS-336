@@ -1,23 +1,24 @@
-from tokenizer import Tokenizer
+from tinyllm.tokenizer import Tokenizer
+from tinyllm.patterns import GPT_2_PATTERN as gpt2_pattern
+
 from typing import List, Dict, Tuple, Set
 from typing import BinaryIO
 from dataclasses import dataclass
 from os import PathLike
 from collections import defaultdict, Counter
-
 import os
 
 import regex as re
 import heapq
 
-from patterns import GPT_2_PATTERN as gpt2_pattern
-
 from concurrent.futures import ThreadPoolExecutor
 from threading import RLock
 
-from functools import total_ordering
+import multiprocessing
+from multiprocessing import Process
 
-from utils import timeit
+from functools import total_ordering
+from utils.utils import timeit
 
 @dataclass
 class BPECorpusStats:
@@ -29,12 +30,13 @@ class BPECorpusStats:
 @total_ordering
 class HeapqPair:
     count: int
-    in_bytes: bytes
     pair: Tuple[int, int]
+    pair_bytes: tuple[bytes, bytes]
 
     def __lt__(self, other):
         # inverse comparison
-        if self.count == other.count: return self.in_bytes > other.in_bytes
+        if self.count == other.count: 
+            return self.pair_bytes > other.pair_bytes
         else: return self.count > other.count
 
 class BPETokenizer(Tokenizer):
@@ -45,15 +47,21 @@ class BPETokenizer(Tokenizer):
     ):
         super().__init__(vocab_size, special_tokens)
 
-        self.merges: List[Tuple[int, int]] = list()             # Record for merges
+        self.merges: List[Tuple[bytes, bytes]] = list()             # Record for merges
         self.pair_freq: Dict[Tuple[int, int], int] = Counter()  # Frequency of pairs
         self.corpus: Dict[bytes, BPECorpusStats] = dict()         # Corpus
 
-    def train(
-        self,
-        corpus: Dict[str, int]
-    ):
-        pass
+        self._initialize_vocab()
+
+    def train(self, input_path: str|PathLike, **kwargs) -> Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
+        if 'vocab_size' in kwargs:
+            self.vocab_size = kwargs['vocab_size']
+        if 'special_tokens' in kwargs:
+            self.special_tokens = kwargs['special_tokens']
+
+        self._train(input_path)
+        return self.vocab, self.merges
+
 
     def encode(self):
         ...
@@ -80,7 +88,7 @@ class BPETokenizer(Tokenizer):
         return self.vocab[_id]
 
     def _inverse_lookup(self, word: bytes) -> int:
-        if word not in self.inverse_vocab: raise ValueError("{} not in vocab".format(word))
+        if word not in self.inverse_vocab: raise ValueError("{} not in inverse_vocab".format(word))
         return self.inverse_vocab[word]
 
     def _assemble_string(self, pair: Tuple[int, int]) -> bytes:
@@ -90,6 +98,7 @@ class BPETokenizer(Tokenizer):
     @timeit
     def _train(self, file_path: PathLike|str):
 
+        """
         # Read training corpus, corpus are in Dict[str, BPECorpusStats]
         self._read_training_corpus(file_path)
 
@@ -104,18 +113,21 @@ class BPETokenizer(Tokenizer):
             new_pairs = [(self._inverse_lookup(a), self._inverse_lookup(b)) for a,b in zip(v.sequence[:-1], v.sequence[1:])]    # Each items in new_pairs is Tuple[int, int]
             for pair in new_pairs:
                 self.pair_freq[pair] += v.count   # Update pair_freq
-                mapping[pair].add(k)        # update mapping
-        
+                mapping[pair].add(k)              # update mapping
+        """
+        mapping: Dict[Tuple[int, int], Set[bytes]] = defaultdict(set)
+
+        self.pair_freq, mapping, self.corpus = self._preparation(file_path)
 
         # Now we've built all mappings, let's start merging
         # First we can implement a priority queue to find the frequent pair
         # Here we initialize the priority queue
-        heapq_freq = [HeapqPair(count, self._assemble_string(pair), pair) for pair,count in self.pair_freq.items()]
+        heapq_freq = [HeapqPair(count, pair, tuple(map(self._lookup, pair))) for pair,count in self.pair_freq.items()]
         heapq.heapify(heapq_freq)
 
         index = 0
 
-        while self.get_vocab_size <= self.vocab_size and heapq_freq:
+        while self.get_vocab_size < self.vocab_size and heapq_freq:
             # TODO: Changes the way how heapq pop elements
             # Lazy deletion
             
@@ -127,12 +139,12 @@ class BPETokenizer(Tokenizer):
                     break
             index += 1
                 
-            self.merges.append(pair)                                # Update merges
+            self.merges.append((self._lookup(pair[0]), self._lookup(pair[1])))                                 # Update merges
             self._update_vocab(b''.join(map(self._lookup, pair)))    # Update vocab with merged pair
 
 
             # Merging:
-            #+Make changes based on mapping. i.e. We need to :
+            #+Make changes based on mapping. i.e. We need to:
             #+Update the corpus
             #+New pairs emerge
             #+Adjacent pairs might needs to be changed! So update it.
@@ -191,14 +203,96 @@ class BPETokenizer(Tokenizer):
             for pair in freq_changed_pairs:
                 count = self.pair_freq[pair]
                 in_bytes = self._assemble_string(pair)
-                if count: heapq.heappush(heapq_freq, HeapqPair(count, in_bytes, pair))
+                if count: heapq.heappush(heapq_freq, HeapqPair(count, pair, tuple(map(self._lookup, pair))))
 
             # Clean up
             freq_changed_pairs.clear()
-                
+
+    def _save_vocab(self, file_path: PathLike|str):
+        ...
+
+    def _save_merges(self, file_path: PathLike|str):
+        ...
+
+    def _preparation(self, file_path: PathLike|str):
+        """General Initialization, This function does following things(in parallel):
+        1. Read training corpuses
+        2. do pre-tokenization for each read chunk
+        3. update pair to bytes mapping
+        4. update pair_freq mapping
+        """
+        import concurrent.futures
+        mapping: Dict[Tuple[int, int], Set[bytes]] = defaultdict(set)
+        pair_freq: Dict[Tuple[int, int], int] = Counter()  # Frequency of pairs
+        corpus: Dict[bytes, BPECorpusStats] = dict()         # Corpus
+
+
+        number_of_processes = 4 if not os.cpu_count() else os.cpu_count()
+
+        with open(file_path, "rb") as f:
+            boundaries = self._find_chunk_boundaries(f, number_of_processes, b"<|endoftext|>")
+
+        futures = []
+        queue = multiprocessing.Manager().Queue()
+        
+        with concurrent.futures.ProcessPoolExecutor(number_of_processes) as executor:
+            for start, end in zip(boundaries[:-1], boundaries[1:]):
+                futures.append(executor.submit(self._preparation_worker, file_path, start, end, queue))
+            
+        for future in concurrent.futures.as_completed(futures):
+          try:
+              future.result()  # 获取结果，会抛出工作进程中的异常
+          except Exception as e:
+              print(f"Worker failed: {e}")
+
+        while not queue.empty():
+            _pair_freq, _mapping, _corpus = queue.get()
+
+            for pair,freq in _pair_freq.items():
+                pair_freq[pair] += freq
+
+            for pair,bytes_set in _mapping.items():
+                mapping[pair].update(bytes_set)
+
+            corpus.update(_corpus)
+
+        return pair_freq, mapping, corpus
+
+
+
+    def _preparation_worker(self, file_path, start: int, end: int, q):
+        # corpus: Dict[bytes, BPECorpusStats] = {}
+        # pair_freq: Dict[Tuple[int, int], int] = Counter()
+        # mapping: Dict[Tuple[int, int], Set[bytes]] = defaultdict(set)
+        corpus = {}
+        pair_freq = Counter()
+        mapping = defaultdict(set)
+
+        with open(file_path, 'rb') as f:
+            f.seek(start)
+            chunk = f.read(end-start).decode('utf-8', errors='ignore')
+            _corpus = self._pre_tokenization(chunk)
+
+            for k,v in _corpus.items():
+                if k not in self.corpus:
+                    corpus[k] = BPECorpusStats([i.to_bytes() for i in k], 
+                                                    [self._inverse_lookup(c.to_bytes()) for c in k],
+                                                    count=v)
+                else:
+                    corpus[k].count += v
+            
+            for k,v in corpus.items():
+                new_pairs = [tuple(map(self._inverse_lookup, (a, b))) for a,b, in zip(v.sequence[:-1], v.sequence[1:])]
+                for pair in new_pairs:
+                    pair_freq[pair] += v.count
+                    mapping[pair].add(k)
+
+        q.put((pair_freq, mapping, corpus))     # final prodcut is (pair_freq, mapping)
+
 
     def _merge_pair(self, pre_token: bytes, pair: Tuple[int, int]) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
         """Merge new pair in pre_token and returns ...
+        Not Parallelizable...
         """
         target = self.corpus[pre_token]
         _merged = b''.join(map(self._lookup, pair))
@@ -233,7 +327,7 @@ class BPETokenizer(Tokenizer):
 
     def _read_training_corpus(self, file_path: PathLike|str):
         """Read training file and return an iterator of corpus"""
-        corpuse: Dict[str, int] = defaultdict(int)
+        corpus: Dict[bytes, int] = defaultdict(int)
         with open(file_path, 'rb') as f:
             num_processes = 4
             boundaries = self._find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
@@ -251,6 +345,7 @@ class BPETokenizer(Tokenizer):
                                                         count=v)
                     else:
                         self.corpus[k].count += v
+
     def __read_training_corpus(self, file_path: PathLike|str):
         """Read training file and return an iterator of corpus"""
         corpuses: List[Dict[bytes, int]] = []
@@ -283,9 +378,6 @@ class BPETokenizer(Tokenizer):
                                                         count=v)
                     else:
                         self.corpus[k].count += v
-                
-
-            
 
     def _pre_tokenization(self, text: str) -> Dict[bytes, int]:
 
@@ -293,10 +385,13 @@ class BPETokenizer(Tokenizer):
         
         # Remove all special token inside current chunk
         pattern = '|'.join([re.escape(st) for st in self.special_tokens])
-        cleaned_text = re.sub(pattern, '', text)
+        pattern = re.compile(pattern)
+
+        splitted_chunk = pattern.split(text)
         
-        for token in re.finditer(gpt2_pattern, cleaned_text):
-            corpus[token.group(0).encode('utf-8')] += 1
+        for cleaned_text in splitted_chunk:
+            for token in re.finditer(gpt2_pattern, cleaned_text):
+                corpus[token.group(0).encode('utf-8')] += 1
 
         return corpus
 
@@ -348,11 +443,9 @@ class BPETokenizer(Tokenizer):
         return sorted(set(chunk_boundaries))
 
 if __name__ == '__main__':
-    from pprint import pprint
+    from pathlib import Path
+
+    root = Path('../..')
     bpe = BPETokenizer(1000)
-    bpe._initialize_vocab()
-    bpe._train('./tests/fixtures/tinystories_sample_5M.txt')
-    #bpe._train('./Sampletext')
-    pprint(bpe.vocab)
-        
+    bpe.train(root / 'tests/fixtures/tinystories_sample_5M.txt')
 

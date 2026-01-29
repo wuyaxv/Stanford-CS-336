@@ -8,7 +8,7 @@ def timeit(f):
         start = perf_counter()
         result = f(*args, **kwargs)
         end = perf_counter()
-        print("perf counter: {}s".format(f.__name__))
+        print("{}: perf counter: {}s".format(f.__name__, end-start))
         return result
 
     return wrapper

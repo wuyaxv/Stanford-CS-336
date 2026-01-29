@@ -49,3 +49,6 @@ This course is designed to provide sufficient knowledge of language models by wa
 - Update on 2025-12-07: Basic implementation of BPE Tokenizer but requires optimization.
 - Update on 2025-12-15: Bug fix and optimization of BPE Tokenizer; Finished Lecture 3.
     - A working version of BPE Tokenizer with some optimizations implemented. (parallelization not implemented though)
+- Update on 2026-1-29: Back in the game! Reimplement BPE Tokenizer and add multiprocessing for pre-tokenizing. Sorry I'm gone for way too long.
+    - test\_train\_bpe PASSED
+    - test\_train_bpe\_speed PASSED

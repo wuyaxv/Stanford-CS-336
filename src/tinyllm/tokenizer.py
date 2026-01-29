@@ -27,10 +27,7 @@ class Tokenizer(ABC):
         pass
 
     @abstractmethod
-    def train(
-        self,
-        corpus: Dict[str, int]
-    ):
+    def train(self, input_path: str, **kwargs) -> Tuple:
         pass
 
     @property
