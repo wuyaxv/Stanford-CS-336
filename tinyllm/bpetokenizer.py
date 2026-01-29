@@ -1,24 +1,41 @@
 from tokenizer import Tokenizer
-from typing import List, Dict, Tuple, Set, Union, Iterator, Any, Optional
-from typing import Iterator, Iterable
+from typing import List, Dict, Tuple, Set
 from typing import BinaryIO
 from dataclasses import dataclass
 from os import PathLike
 from collections import defaultdict, Counter
-import os
 
-# from functools import total_ordering
+import os
 
 import regex as re
 import heapq
 
 from patterns import GPT_2_PATTERN as gpt2_pattern
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import RLock
+
+from functools import total_ordering
+
+from utils import timeit
+
 @dataclass
 class BPECorpusStats:
     sequence: List[bytes]
     sequence_id: List[int]
     count: int = 0
+
+@dataclass
+@total_ordering
+class HeapqPair:
+    count: int
+    in_bytes: bytes
+    pair: Tuple[int, int]
+
+    def __lt__(self, other):
+        # inverse comparison
+        if self.count == other.count: return self.in_bytes > other.in_bytes
+        else: return self.count > other.count
 
 class BPETokenizer(Tokenizer):
     
@@ -70,6 +87,7 @@ class BPETokenizer(Tokenizer):
         """Assemble string based on given pair and return the assembled string"""
         return self._lookup(pair[0]) + self._lookup(pair[1])
 
+    @timeit
     def _train(self, file_path: PathLike|str):
 
         # Read training corpus, corpus are in Dict[str, BPECorpusStats]
@@ -85,14 +103,17 @@ class BPETokenizer(Tokenizer):
         for k,v in self.corpus.items():
             new_pairs = [(self._inverse_lookup(a), self._inverse_lookup(b)) for a,b in zip(v.sequence[:-1], v.sequence[1:])]    # Each items in new_pairs is Tuple[int, int]
             for pair in new_pairs:
-                self.pair_freq[pair] += 1   # Update pair_freq
+                self.pair_freq[pair] += v.count   # Update pair_freq
                 mapping[pair].add(k)        # update mapping
+        
 
         # Now we've built all mappings, let's start merging
         # First we can implement a priority queue to find the frequent pair
         # Here we initialize the priority queue
-        heapq_freq = [(-count, self._assemble_string(pair), pair) for pair,count in self.pair_freq.items()]
+        heapq_freq = [HeapqPair(count, self._assemble_string(pair), pair) for pair,count in self.pair_freq.items()]
         heapq.heapify(heapq_freq)
+
+        index = 0
 
         while self.get_vocab_size <= self.vocab_size and heapq_freq:
             # TODO: Changes the way how heapq pop elements
@@ -101,9 +122,10 @@ class BPETokenizer(Tokenizer):
             pair: Tuple[int, int] = (-1, -1) # For initialization only.
             while heapq_freq:
                 heapq_element = heapq.heappop(heapq_freq)           # New pair to be updated
-                pair = heapq_element[-1]
-                if self.pair_freq[pair] == -heapq_element[0]:
+                pair = heapq_element.pair
+                if self.pair_freq[pair] == heapq_element.count:
                     break
+            index += 1
                 
             self.merges.append(pair)                                # Update merges
             self._update_vocab(b''.join(map(self._lookup, pair)))    # Update vocab with merged pair
@@ -168,8 +190,8 @@ class BPETokenizer(Tokenizer):
             # Update priority queue
             for pair in freq_changed_pairs:
                 count = self.pair_freq[pair]
-                in_str = self._assemble_string(pair)
-                if count: heapq.heappush(heapq_freq, (-count, in_str, pair))
+                in_bytes = self._assemble_string(pair)
+                if count: heapq.heappush(heapq_freq, HeapqPair(count, in_bytes, pair))
 
             # Clean up
             freq_changed_pairs.clear()
@@ -229,6 +251,40 @@ class BPETokenizer(Tokenizer):
                                                         count=v)
                     else:
                         self.corpus[k].count += v
+    def __read_training_corpus(self, file_path: PathLike|str):
+        """Read training file and return an iterator of corpus"""
+        corpuses: List[Dict[bytes, int]] = []
+        rlock = RLock()
+        num_processes = 2
+
+        def __read_chunk_corpus(fd: BinaryIO, start: int, end: int):
+            nonlocal corpuses
+            fd.seek(start)
+            chunk = fd.read(end-start).decode('utf-8', errors='ignore')
+            corpus = self._pre_tokenization(chunk)
+
+            rlock.acquire()
+            corpuses.append(corpus)
+            rlock.release()
+            
+
+        with open(file_path, 'rb') as f:
+            boundaries = self._find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
+
+            with ThreadPoolExecutor(max_workers=num_processes) as executor:
+                for start, end in zip(boundaries[:-1], boundaries[1:]):
+                    executor.submit(__read_chunk_corpus, f, start, end)
+
+            for corpus in corpuses:
+                for k,v in corpus.items():
+                    if k not in self.corpus:
+                        self.corpus[k] = BPECorpusStats([i.to_bytes() for i in k], 
+                                                        [self._inverse_lookup(c.to_bytes()) for c in k],
+                                                        count=v)
+                    else:
+                        self.corpus[k].count += v
+                
+
             
 
     def _pre_tokenization(self, text: str) -> Dict[bytes, int]:
@@ -292,10 +348,11 @@ class BPETokenizer(Tokenizer):
         return sorted(set(chunk_boundaries))
 
 if __name__ == '__main__':
-    bpe = BPETokenizer(10000)
+    from pprint import pprint
+    bpe = BPETokenizer(1000)
     bpe._initialize_vocab()
-    bpe._train('tests/fixtures/tinystories_sample_5M.txt')
-    print(bpe.vocab)
-    print(bpe.merges)
+    bpe._train('./tests/fixtures/tinystories_sample_5M.txt')
+    #bpe._train('./Sampletext')
+    pprint(bpe.vocab)
         
 
