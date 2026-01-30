@@ -12,7 +12,12 @@ import regex as re
 import heapq
 import concurrent.futures
 import multiprocessing
+from multiprocessing.connection import Connection
 from functools import total_ordering
+
+from rich.progress import MofNCompleteColumn, Progress, SpinnerColumn, TimeElapsedColumn, MofNCompleteColumn
+
+import logging
 
 @dataclass
 class BPECorpusStats:
@@ -45,6 +50,9 @@ class BPETokenizer(Tokenizer):
         self.pair_freq: Dict[Tuple[int, int], int] = Counter()      # Frequency of pairs
         self.corpus: Dict[bytes, BPECorpusStats] = dict()           # Corpus
 
+        self.logger = logging.getLogger(__name__)
+        logging.basicConfig(level=logging.DEBUG)
+
         self._initialize_vocab()
 
     def train(self, input_path: str|PathLike, **kwargs) -> Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
@@ -55,7 +63,6 @@ class BPETokenizer(Tokenizer):
 
         self._train(input_path)
         return self.vocab, self.merges
-
 
     def encode(self):
         ...
@@ -90,7 +97,7 @@ class BPETokenizer(Tokenizer):
         return self._lookup(pair[0]) + self._lookup(pair[1])
 
     @timeit
-    def _train(self, file_path: PathLike|str):
+    def _train(self, file_path: PathLike|str, progress=True):
         """Training code"""
 
         """Serial processing code...
@@ -113,7 +120,7 @@ class BPETokenizer(Tokenizer):
 
         mapping: Dict[Tuple[int, int], Set[bytes]] = defaultdict(set)
 
-        self.pair_freq, mapping, self.corpus = self._preparation(file_path)
+        self.pair_freq, mapping, self.corpus = self._preparation(file_path, progress=progress)
 
         # Now we've built all mappings, let's start merging
         # First we can implement a priority queue to find the frequent pair
@@ -200,33 +207,48 @@ class BPETokenizer(Tokenizer):
     def _save_merges(self, file_path: PathLike|str):
         ...
 
-    def _preparation(self, file_path: PathLike|str):
+    def _preparation(self, file_path: PathLike|str, progress=True):
         """General Initialization, This function does following things(in parallel):
         1. Read training corpuses
         2. do pre-tokenization for each read chunk
         3. update pair to bytes mapping
         4. update pair_freq mapping
         """
+
+        progress_tasks = []
+
         mapping: Dict[Tuple[int, int], Set[bytes]] = defaultdict(set)
         pair_freq: Dict[Tuple[int, int], int] = Counter()  # Frequency of pairs
         corpus: Dict[bytes, BPECorpusStats] = dict()         # Corpus
 
-
-        number_of_processes = 4 if not os.cpu_count() else os.cpu_count()
+        number_of_processes = 4 if not os.cpu_count() else os.cpu_count()   # Default number of workers 4
 
         with open(file_path, "rb") as f:
             boundaries = self._find_chunk_boundaries(f, number_of_processes, b"<|endoftext|>")
 
         futures = []
         queue = multiprocessing.Manager().Queue()
-        
-        with concurrent.futures.ProcessPoolExecutor(number_of_processes) as executor:
-            for start, end in zip(boundaries[:-1], boundaries[1:]):
-                futures.append(executor.submit(self._preparation_worker, file_path, start, end, queue))
+
+        with Progress(SpinnerColumn(), *Progress.get_default_columns(), MofNCompleteColumn(), TimeElapsedColumn(),transient=True) as p:
+            with concurrent.futures.ProcessPoolExecutor(4) as executor:
+                for start, end in zip(boundaries[:-1], boundaries[1:]):
+                    progress_task = p.add_task(description='')
+                    pipe = multiprocessing.Pipe()
+                    progress_tasks.append((progress_task, pipe))
+                    futures.append(executor.submit(self._preparation_worker, file_path, start, end, queue, pipe[-1]))
+
+                while any(not f.done() for f in futures):
+                    for i,(progress_task,(rx,_)) in enumerate(progress_tasks):
+                        if rx.poll():
+                            description, completed, total_number, done = rx.recv()
+                            if not done:
+                                p.update(progress_task, total=total_number, completed=completed, description=description)
+                            else:
+                                p.update(progress_task, visible=False)
             
         for future in concurrent.futures.as_completed(futures):
           try:
-              future.result()  # 获取结果，会抛出工作进程中的异常
+              future.result()  # Get result and spit any error message
           except Exception as e:
               print(f"Worker failed: {e}")
 
@@ -243,9 +265,7 @@ class BPETokenizer(Tokenizer):
 
         return pair_freq, mapping, corpus
 
-
-
-    def _preparation_worker(self, file_path, start: int, end: int, q):
+    def _preparation_worker(self, file_path, start: int, end: int, q, pipe:Connection):
         # corpus: Dict[bytes, BPECorpusStats] = {}
         # pair_freq: Dict[Tuple[int, int], int] = Counter()
         # mapping: Dict[Tuple[int, int], Set[bytes]] = defaultdict(set)
@@ -254,10 +274,17 @@ class BPETokenizer(Tokenizer):
         mapping = defaultdict(set)
 
         with open(file_path, 'rb') as f:
+            pipe.send(('Reading file...', 0, end-start, False))
             f.seek(start)
             chunk = f.read(end-start).decode('utf-8', errors='ignore')
-            _corpus = self._pre_tokenization(chunk)
+            pipe.send(('Reading file...', end-start, end-start, False))
 
+            _corpus = self._pre_tokenization(chunk, pipe)
+
+            total_number = len(_corpus)
+            pipe.send(("Loading corpus...", 0, total_number, False))
+
+            i = 0
             for k,v in _corpus.items():
                 if k not in self.corpus:
                     corpus[k] = BPECorpusStats([i.to_bytes() for i in k], 
@@ -265,14 +292,22 @@ class BPETokenizer(Tokenizer):
                                                     count=v)
                 else:
                     corpus[k].count += v
+                i+=1
+                pipe.send(("Loading corpus...", i, total_number, False))
             
+            total_number = len(corpus)
+            pipe.send(("Counting pair frequency...", 0, total_number, False))
+            i = 0
             for k,v in corpus.items():
                 new_pairs = [tuple(map(self._inverse_lookup, (a, b))) for a,b, in zip(v.sequence[:-1], v.sequence[1:])]
                 for pair in new_pairs:
                     pair_freq[pair] += v.count
                     mapping[pair].add(k)
+                i += 1
+                pipe.send(("Counting pair frequency...", i, total_number, False))
 
         q.put((pair_freq, mapping, corpus))     # final prodcut is (pair_freq, mapping)
+        pipe.send(("Done", 0, 0, True))
 
 
     def _merge_pair(self, pre_token: bytes, pair: Tuple[int, int]) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
@@ -321,7 +356,7 @@ class BPETokenizer(Tokenizer):
                 chunk = f.read(end-start).decode("utf-8", errors="ignore")
 
                 # Run pre-tokenization process on each chunk.
-                corpus = self._pre_tokenization(chunk)
+                corpus = self._pre_tokenization(chunk, None)
                 for k,v in corpus.items():
                     if k not in self.corpus:
                         self.corpus[k] = BPECorpusStats([i.to_bytes() for i in k], 
@@ -330,7 +365,8 @@ class BPETokenizer(Tokenizer):
                     else:
                         self.corpus[k].count += v
 
-    def _pre_tokenization(self, text: str) -> Dict[bytes, int]:
+
+    def _pre_tokenization(self, text: str, pipe:Connection) -> Dict[bytes, int]:
 
         corpus: Dict[bytes, int] = defaultdict(int)
         
@@ -340,7 +376,11 @@ class BPETokenizer(Tokenizer):
 
         splitted_chunk = pattern.split(text)
         
+        pipe.send(("Pre tokenization...", 0, len(splitted_chunk), False))
+        i = 0
         for cleaned_text in splitted_chunk:
+            i += 1
+            pipe.send(("Pre tokenization...", i, len(splitted_chunk), False))
             for token in re.finditer(gpt2_pattern, cleaned_text):
                 corpus[token.group(0).encode('utf-8')] += 1
 
@@ -399,6 +439,7 @@ if __name__ == '__main__':
     root = Path('../../data')
     bpe = BPETokenizer(1000)
 
-    bpe._train(root / 'TinyStoriesV2-GPT4-train.txt')
+    #bpe._train(root / 'TinyStoriesV2-GPT4-train.txt')
+    bpe._train('../../tests/fixtures/tinystories_sample_5M.txt')
     
 
