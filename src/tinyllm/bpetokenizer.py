@@ -129,77 +129,78 @@ class BPETokenizer(Tokenizer):
         heapq.heapify(heapq_freq)
 
         index = 0
+        with Progress(SpinnerColumn(), *Progress.get_default_columns(), MofNCompleteColumn(), TimeElapsedColumn(), transient=True) as progress:
+            task = progress.add_task("Calculating vocab...", total=self.vocab_size)
+            while self.get_vocab_size < self.vocab_size and heapq_freq:
 
-        while self.get_vocab_size < self.vocab_size and heapq_freq:
+                pair: Tuple[int, int] = (-1, -1)
+                while heapq_freq:
+                    # Lazy deletion
+                    heapq_element = heapq.heappop(heapq_freq)
+                    pair = heapq_element.pair
+                    if self.pair_freq[pair] == heapq_element.count:
+                        break
+                index += 1
+                progress.update(task, completed=index)
+                self.merges.append((self._lookup(pair[0]), self._lookup(pair[1])))  # Update merges
+                self._update_vocab(b''.join(map(self._lookup, pair)))               # Update vocab with merged pair
 
-            pair: Tuple[int, int] = (-1, -1)
-            while heapq_freq:
-                # Lazy deletion
-                heapq_element = heapq.heappop(heapq_freq)
-                pair = heapq_element.pair
-                if self.pair_freq[pair] == heapq_element.count:
-                    break
-            index += 1
-                
-            self.merges.append((self._lookup(pair[0]), self._lookup(pair[1])))  # Update merges
-            self._update_vocab(b''.join(map(self._lookup, pair)))               # Update vocab with merged pair
+                to_delete = defaultdict(set)
+                to_add    = defaultdict(set)
+                freq_changed_pairs = set()
 
-            to_delete = defaultdict(set)
-            to_add    = defaultdict(set)
-            freq_changed_pairs = set()
+                for pre_token in mapping[pair]:
+                    factor = self.corpus[pre_token].count
+                    old_pairs, new_pairs = self._merge_pair(pre_token, pair)    # Get old_pairs and new_pairs for comparison
 
-            for pre_token in mapping[pair]:
-                factor = self.corpus[pre_token].count
-                old_pairs, new_pairs = self._merge_pair(pre_token, pair)    # Get old_pairs and new_pairs for comparison
+                    old_pairs_dict = defaultdict(int)
+                    new_pairs_dict = defaultdict(int)
+                    delta = defaultdict(int)
 
-                old_pairs_dict = defaultdict(int)
-                new_pairs_dict = defaultdict(int)
-                delta = defaultdict(int)
+                    for k in set(old_pairs):
+                        old_pairs_dict[k] += old_pairs.count(k)
+                    for k in set(new_pairs):
+                        new_pairs_dict[k] += new_pairs.count(k)
 
-                for k in set(old_pairs):
-                    old_pairs_dict[k] += old_pairs.count(k)
-                for k in set(new_pairs):
-                    new_pairs_dict[k] += new_pairs.count(k)
+                    for old_pair,count in old_pairs_dict.items():
+                        if old_pair in new_pairs_dict:
+                            count_n = new_pairs_dict[old_pair]
+                            delta[old_pair] = count_n - count                   # pairs to be changed
+                        else:
+                            # old pair is not in new pair no more
+                            delta[old_pair] = -count
+                            to_delete[old_pair].add(pre_token)
 
-                for old_pair,count in old_pairs_dict.items():
-                    if old_pair in new_pairs_dict:
-                        count_n = new_pairs_dict[old_pair]
-                        delta[old_pair] = count_n - count                   # pairs to be changed
-                    else:
-                        # old pair is not in new pair no more
-                        delta[old_pair] = -count
-                        to_delete[old_pair].add(pre_token)
+                    
+                    for new_pair,count in new_pairs_dict.items():
+                        if new_pair not in old_pairs_dict: 
+                            delta[new_pair] = count
+                            to_add[new_pair].add(pre_token)
 
-                
-                for new_pair,count in new_pairs_dict.items():
-                    if new_pair not in old_pairs_dict: 
-                        delta[new_pair] = count
-                        to_add[new_pair].add(pre_token)
+                    # Update pair_freq
+                    for _pair,_delta in delta.items():
+                        self.pair_freq[_pair] += _delta * factor
+                        if self.pair_freq[_pair] == 0: del self.pair_freq[_pair]
+                        else: freq_changed_pairs.add(_pair)
 
-                # Update pair_freq
-                for _pair,_delta in delta.items():
-                    self.pair_freq[_pair] += _delta * factor
-                    if self.pair_freq[_pair] == 0: del self.pair_freq[_pair]
-                    else: freq_changed_pairs.add(_pair)
+                # Update mapping
+                for old_pair,pre_tokens in to_delete.items():
+                    for pre_token in pre_tokens: 
+                        mapping[old_pair].remove(pre_token)
+                    if not len(mapping[old_pair]): del mapping[old_pair]
 
-            # Update mapping
-            for old_pair,pre_tokens in to_delete.items():
-                for pre_token in pre_tokens: 
-                    mapping[old_pair].remove(pre_token)
-                if not len(mapping[old_pair]): del mapping[old_pair]
+                for new_pair,pre_tokens in to_add.items():
+                    for pre_token in pre_tokens:
+                        mapping[new_pair].add(pre_token)
 
-            for new_pair,pre_tokens in to_add.items():
-                for pre_token in pre_tokens:
-                    mapping[new_pair].add(pre_token)
+                # Update priority queue
+                for pair in freq_changed_pairs:
+                    count = self.pair_freq[pair]
+                    in_bytes = self._assemble_string(pair)
+                    if count: heapq.heappush(heapq_freq, HeapqPair(count, pair, tuple(map(self._lookup, pair))))
 
-            # Update priority queue
-            for pair in freq_changed_pairs:
-                count = self.pair_freq[pair]
-                in_bytes = self._assemble_string(pair)
-                if count: heapq.heappush(heapq_freq, HeapqPair(count, pair, tuple(map(self._lookup, pair))))
-
-            # Clean up
-            freq_changed_pairs.clear()
+                # Clean up
+                freq_changed_pairs.clear()
 
     def _save_vocab(self, file_path: PathLike|str):
         ...
@@ -230,7 +231,7 @@ class BPETokenizer(Tokenizer):
         queue = multiprocessing.Manager().Queue()
 
         with Progress(SpinnerColumn(), *Progress.get_default_columns(), MofNCompleteColumn(), TimeElapsedColumn(),transient=True) as p:
-            with concurrent.futures.ProcessPoolExecutor(4) as executor:
+            with concurrent.futures.ProcessPoolExecutor(number_of_processes) as executor:
                 for start, end in zip(boundaries[:-1], boundaries[1:]):
                     progress_task = p.add_task(description='')
                     pipe = multiprocessing.Pipe()
