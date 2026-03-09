@@ -218,3 +218,7 @@ __marimo__/
 # Training data
 data/
 fixtures/
+
+*.swp
+
+.DS_Store
